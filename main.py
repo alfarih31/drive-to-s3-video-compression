@@ -1,4 +1,5 @@
 import boto3
+from botocore.exceptions import ClientError
 import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -7,6 +8,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configuration
+_MAX_FILE_SIZE = os.getenv("MAX_FILE_SIZE", "9")
+MAX_FILE_SIZE = int(_MAX_FILE_SIZE)
 BUCKET_NAME = os.getenv("BUCKET_NAME", "koala-minting-nft-temp")
 S3_KEY_PREFIX = os.getenv("S3_KEY_PREFIX", "")
 LOCAL_DOWNLOAD_DIR = os.getenv("LOCAL_DOWNLOAD_DIR", "/tmp/koala-migrator/raw")
@@ -37,8 +40,8 @@ def compress_video(input_path, output_path):
         '-y',
         '-i', input_path,
         '-vcodec', 'libx265',  # Example codec for compression
-        '-preset', 'faster',
-        '-crf', '13',  # Constant Rate Factor, adjust for desired quality/size
+        '-preset', 'fast',
+        '-crf', '18',  # Constant Rate Factor, adjust for desired quality/size
         output_path
     ]
     subprocess.run(ffmpeg_command, check=True)
@@ -48,8 +51,26 @@ def upload_file(local_path, bucket_name, key):
     s3.upload_file(local_path, bucket_name, key)
 
 
+def s3_file_meta(bucket_name, key):
+    try:
+        return s3.head_object(Bucket=bucket_name, Key=key)
+    except ClientError:
+        return None
+
+
 def process_video(filename):
     try:
+        final_key = os.path.join(S3_KEY_PREFIX, filename)
+        meta = s3_file_meta(BUCKET_NAME, final_key)
+        # if meta exist check for size
+        if meta is not None:
+            content_length = meta["ContentLength"]
+            file_size = content_length/1024/1024
+
+            # Skip if file_size already less than MAX_FILE_SIZE
+            if file_size <= MAX_FILE_SIZE:
+                return
+
         local_download_path = os.path.join(LOCAL_DOWNLOAD_DIR, filename)
         local_compressed_path = os.path.join(LOCAL_COMPRESS_DIR, filename)
 
@@ -62,8 +83,8 @@ def process_video(filename):
         compress_video(local_download_path, local_compressed_path)
 
         # Upload compressed video to S3
-        print(f"Uploading {filename} to S3...")
-        upload_file(local_compressed_path, BUCKET_NAME, os.path.join(S3_KEY_PREFIX, filename))
+        print(f"Uploading {final_key} to S3...")
+        upload_file(local_compressed_path, BUCKET_NAME, final_key)
 
         # Clean up local files
         os.remove(local_download_path)
